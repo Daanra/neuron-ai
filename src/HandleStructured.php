@@ -8,6 +8,7 @@ use GuzzleHttp\Exception\RequestException;
 use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\ToolCallMessage;
 use NeuronAI\Chat\Messages\UserMessage;
+use NeuronAI\Exceptions\ToolInterrupt;
 use NeuronAI\Exceptions\ToolMaxTriesException;
 use NeuronAI\Observability\Events\AgentError;
 use NeuronAI\Observability\Events\Deserialized;
@@ -82,7 +83,13 @@ trait HandleStructured
                 $this->addToChatHistory($response);
 
                 if ($response instanceof ToolCallMessage) {
-                    $toolCallResult = $this->executeTools($response);
+                    try {
+                        $toolCallResult = $this->executeTools($response);
+                    } catch (ToolInterrupt $ex) {
+                        // When receiving an interrupt, we should not attempt to retry
+                        $exception = $ex;
+                        break;
+                    }
                     return self::structured($toolCallResult, $class, $maxRetries);
                 }
 
