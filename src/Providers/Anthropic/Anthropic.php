@@ -82,22 +82,17 @@ class Anthropic implements AIProviderInterface
 
     /**
      * @param array<string, mixed> $message
+     * @param string $text Accumulated text content before tool call
      * @throws ProviderException
      */
-    public function createToolCallMessage(array $message): Message
+    public function createToolCallMessage(array $message, string $text = ''): Message
     {
         $tool = $this->findTool($message['name'])
             ->setInputs($message['input'])
             ->setCallId($message['id']);
 
-        // During serialization and deserialization PHP convert the original empty object {} to empty array []
-        // causing an error on the Anthropic API. If there are no inputs, we need to restore the empty JSON object.
-        if (empty($message['input'])) {
-            $message['input'] = new \stdClass();
-        }
-
         return new ToolCallMessage(
-            [$message],
+            $text,
             [$tool] // Anthropic call one tool at a time. So we pass an array with one element.
         );
     }
