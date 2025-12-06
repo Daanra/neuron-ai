@@ -11,6 +11,8 @@ use ReflectionEnumBackedCase;
 use ReflectionException;
 use ReflectionNamedType;
 use ReflectionProperty;
+use ReflectionUnionType;
+use ReflectionType;
 
 use function array_filter;
 use function array_map;
@@ -83,7 +85,6 @@ class JsonSchema
 
         $this->processedClasses[] = $class;
 
-        // Handle enum types differently
         if ($reflection->isEnum()) {
             $result = $this->processEnum(new ReflectionEnum($class));
             // Remove the class from the processed list after processing
@@ -91,7 +92,6 @@ class JsonSchema
             return $result;
         }
 
-        // Create a basic object schema
         $schema = [
             'type' => 'object',
             'properties' => [],
@@ -99,12 +99,10 @@ class JsonSchema
         ];
 
         $requiredProperties = [];
-
-        // Process all public properties
         $properties = $reflection->getProperties(ReflectionProperty::IS_PUBLIC);
 
-        // Process each property
         foreach ($properties as $property) {
+            // Property name is always the declared property name
             $propertyName = $property->getName();
 
             $schema['properties'][$propertyName] = $this->processProperty($property);
@@ -115,19 +113,14 @@ class JsonSchema
                     $requiredProperties[] = $propertyName;
                 }
             } else {
-                // If the attribute is not available,
-                // use the default logic for required properties
-                $type = $property->getType();
-
+                $type = $property->getType(); // ReflectionType|null
                 $isNullable = $type ? $type->allowsNull() : true;
-
                 if (!$isNullable && !$property->hasDefaultValue()) {
                     $requiredProperties[] = $propertyName;
                 }
             }
         }
 
-        // Add required properties
         if ($requiredProperties !== []) {
             $schema['required'] = $requiredProperties;
         }
@@ -148,48 +141,59 @@ class JsonSchema
     {
         $schema = [];
 
-        // Process Property attribute if present
+        // Attribute passthrough
         $attribute = $this->getPropertyAttribute($property);
         if ($attribute instanceof SchemaProperty) {
             if ($attribute->title !== null) {
                 $schema['title'] = $attribute->title;
             }
-
             if ($attribute->description !== null) {
                 $schema['description'] = $attribute->description;
             }
         }
 
-        /** @var ?ReflectionNamedType $type */
+        /** @var ReflectionType|null $type */
         $type = $property->getType();
-        $typeName = $type?->getName();
 
-        // Handle default values
+        // Default values
         if ($property->hasDefaultValue()) {
             $schema['default'] = $property->getDefaultValue();
         }
 
-        // Process different types
+        // UNION TYPES
+        if ($type instanceof ReflectionUnionType) {
+            $unionSchema = $this->processUnionType($type, $property);
+
+            // Preserve title/description/default at top-level
+            $schema = \array_merge($unionSchema, $schema);
+
+            // Do NOT run nullable post-processing; union already handled null.
+            return $schema;
+        }
+
+        // NAMED TYPES (or no type)
+        /** @var ?ReflectionNamedType $named */
+        $named = $type instanceof ReflectionNamedType ? $type : null;
+        $typeName = $named?->getName();
+
         if ($typeName === 'array') {
             $schema['type'] = 'array';
-
-            // Parse PHPDoc for the array item type(s)
             $docComment = $property->getDocComment();
             if ($docComment) {
-                // Extract all types from PHPDoc
                 $types = $this->extractArrayItemTypes($docComment);
 
                 if (count($types) === 1) {
                     // Single class type - use existing logic
                     $schema['items'] = $this->generateClassSchema($types[0]);
-                } else {
-                    // Multiple class types - use anyOf
+                } elseif (\count($types) > 1) {
                     $schema['items'] = $this->generateAnyOfSchema($types);
+                } else {
+                    $schema['items'] = ['type' => 'string'];
                 }
             } else {
-                // Default to string if no doc comment
                 $schema['items'] = ['type' => 'string'];
             }
+
         }
         // Handle enum types
         elseif ($typeName && enum_exists($typeName)) {
@@ -206,7 +210,6 @@ class JsonSchema
             $typeSchema = $this->getBasicTypeSchema($typeName);
             $schema = array_merge($schema, $typeSchema);
         } else {
-            // Default to string if no type hint
             $schema['type'] = 'string';
         }
 
@@ -222,6 +225,135 @@ class JsonSchema
         }
 
         return $schema;
+    }
+
+    /**
+     * Build schema for a union type
+     *
+     * @throws ReflectionException
+     */
+    protected function processUnionType(ReflectionUnionType $type, ReflectionProperty $property): array
+    {
+        $variants = [];
+        $basicTypes = [];
+
+        foreach ($type->getTypes() as $t) {
+            // $t is ReflectionNamedType
+            $name = $t->getName();
+
+            if ($name === 'null') {
+                // Treat as a basic type for collapse attempt
+                $basicTypes[] = 'null';
+                continue;
+            }
+
+            if ($name === 'array') {
+                // Respect @var parsing for arrays
+                $docComment = $property->getDocComment();
+                $arraySchema = ['type' => 'array'];
+                if ($docComment) {
+                    $types = $this->extractArrayItemTypes($docComment);
+                    if (\count($types) === 1) {
+                        $arraySchema['items'] = $this->generateClassSchema($types[0]);
+                    } elseif (\count($types) > 1) {
+                        $arraySchema['items'] = $this->generateAnyOfSchema($types);
+                    } else {
+                        $arraySchema['items'] = ['type' => 'string'];
+                    }
+                } else {
+                    $arraySchema['items'] = ['type' => 'string'];
+                }
+
+                $variants[] = $arraySchema;
+                continue;
+            }
+
+            if (\enum_exists($name)) {
+                $variants[] = $this->processEnum(new ReflectionEnum($name));
+                continue;
+            }
+
+            if (\class_exists($name)) {
+                $variants[] = $this->generateClassSchema($name);
+                continue;
+            }
+
+            // Basic type
+            $basicTypes[] = $this->getBasicTypeSchema($name)['type'] ?? 'string';
+        }
+
+        // If union is purely basic types (possibly including null), collapse to "type": [ ... ]
+        if ($variants === [] && $basicTypes !== []) {
+            $types = \array_values(\array_unique(\is_array($basicTypes) ? $basicTypes : [$basicTypes]));
+            return ['type' => $types];
+        }
+
+        // If we have both complex variants and basic ones, convert basic ones into variant schemas
+        foreach ($basicTypes as $bt) {
+            // $bt might be 'null' or a basic JSON schema type string
+            $variants[] = ['type' => $bt];
+        }
+
+        // If all variants are simple {"type": "..."} we can also collapse to a single "type": [..]
+        $allSimple = \count($variants) > 0 && \array_reduce(
+                $variants,
+                fn (bool $carry, array $v): bool => $carry && (\count($v) === 1 && isset($v['type']) && !\is_array($v['type'])),
+                true
+            );
+
+        if ($allSimple) {
+            $types = \array_values(\array_unique(\array_map(fn ($v) => $v['type'], $variants)));
+            return ['type' => $types];
+        }
+
+        return ['anyOf' => $variants];
+    }
+
+    // ... processEnum(), getPropertyAttribute() stay the same ...
+
+    /**
+     * Get schema for a basic PHP type
+     *
+     * @param string $type PHP type name
+     * @return array Schema for the type
+     * @throws ReflectionException
+     */
+    protected function getBasicTypeSchema(string $type): array
+    {
+        switch ($type) {
+            case 'string':
+                return ['type' => 'string'];
+
+            case 'int':
+            case 'integer':
+                return ['type' => 'integer'];
+
+            case 'float':
+            case 'double':
+                return ['type' => 'number'];
+
+            case 'bool':
+            case 'boolean':
+                return ['type' => 'boolean'];
+
+            case 'array':
+                return [
+                    'type' => 'array',
+                    'items' => ['type' => 'string'],
+                ];
+
+            case 'null':
+                return ['type' => 'null'];
+
+            default:
+                if (\class_exists($type)) {
+                    return $this->generateClassSchema($type);
+                }
+                if (\enum_exists($type)) {
+                    return $this->processEnum(new ReflectionEnum($type));
+                }
+                return ['type' => 'string'];
+        }
     }
 
     /**
@@ -261,52 +393,52 @@ class JsonSchema
         }
         return null;
     }
-
-    /**
-     * Get schema for a basic PHP type
-     *
-     * @param string $type PHP type name
-     * @return array Schema for the type
-     * @throws ReflectionException
-     */
-    protected function getBasicTypeSchema(string $type): array
-    {
-        switch ($type) {
-            case 'string':
-                return ['type' => 'string'];
-
-            case 'int':
-            case 'integer':
-                return ['type' => 'integer'];
-
-            case 'float':
-            case 'double':
-                return ['type' => 'number'];
-
-            case 'bool':
-            case 'boolean':
-                return ['type' => 'boolean'];
-
-            case 'array':
-                return [
-                    'type' => 'array',
-                    'items' => ['type' => 'string'],
-                ];
-
-            default:
-                // Check if it's a class or enum
-                if (class_exists($type)) {
-                    return $this->generateClassSchema($type);
-                }
-                // Check if it's a class or enum
-                if (enum_exists($type)) {
-                    return $this->processEnum(new ReflectionEnum($type));
-                }
-
-                // Default to string for unknown types
-                return ['type' => 'string'];
-        }
-    }
+//
+//    /**
+//     * Get schema for a basic PHP type
+//     *
+//     * @param string $type PHP type name
+//     * @return array Schema for the type
+//     * @throws ReflectionException
+//     */
+//    protected function getBasicTypeSchema(string $type): array
+//    {
+//        switch ($type) {
+//            case 'string':
+//                return ['type' => 'string'];
+//
+//            case 'int':
+//            case 'integer':
+//                return ['type' => 'integer'];
+//
+//            case 'float':
+//            case 'double':
+//                return ['type' => 'number'];
+//
+//            case 'bool':
+//            case 'boolean':
+//                return ['type' => 'boolean'];
+//
+//            case 'array':
+//                return [
+//                    'type' => 'array',
+//                    'items' => ['type' => 'string'],
+//                ];
+//
+//            default:
+//                // Check if it's a class or enum
+//                if (class_exists($type)) {
+//                    return $this->generateClassSchema($type);
+//                }
+//                // Check if it's a class or enum
+//                if (enum_exists($type)) {
+//                    return $this->processEnum(new ReflectionEnum($type));
+//                }
+//
+//                // Default to string for unknown types
+//                return ['type' => 'string'];
+//        }
+//    }
 
     /**
      * Extract array item types from PHPDoc comment

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace NeuronAI\Workflow;
 
+use NeuronAI\Exceptions\ToolInterrupt;
 use NeuronAI\Exceptions\WorkflowException;
 use NeuronAI\Observability\Events\AgentError;
 use NeuronAI\Observability\Events\WorkflowEnd;
@@ -156,7 +157,16 @@ class Workflow implements WorkflowInterface
 
                 $this->notify('workflow-node-start', new WorkflowNodeStart($currentNode::class, $this->state));
                 try {
-                    $result = $currentNode->run($currentEvent, $this->state);
+                    try {
+                        $result = $currentNode->run($currentEvent, $this->state);
+                    } catch (ToolInterrupt $interrupt) {
+                        throw new WorkflowInterrupt(
+                            $interrupt->getData(),
+                            $currentNode,
+                            $this->state,
+                            $currentEvent
+                        );
+                    }
 
                     if ($result instanceof Generator) {
                         foreach ($result as $event) {

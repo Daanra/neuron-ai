@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace NeuronAI\Tests\Workflow;
 
+use NeuronAI\Tests\Workflow\Stubs\AgentInterruptableNode;
 use NeuronAI\Tests\Workflow\Stubs\CustomState;
 use NeuronAI\Tests\Workflow\Stubs\MultipleInterruptionsNode;
 use NeuronAI\Workflow\Persistence\InMemoryPersistence;
@@ -281,5 +282,28 @@ class WorkflowInterruptTest extends TestCase
         $this->assertTrue($finalState->get('all_interrupts_complete'));
         $this->assertEquals(3, $finalState->get('interrupt_count'));
         $this->assertInstanceOf(CustomState::class, $finalState);
+    }
+
+    public function testAgentInterrupt(): void
+    {
+        $this->expectException(WorkflowInterrupt::class);
+        $this->expectExceptionMessage('Workflow interrupted for human input');
+
+        $workflow = Workflow::make(
+            persistence: new InMemoryPersistence(),
+            workflowId: 'test-workflow'
+        )->addNodes([
+            new AgentInterruptableNode(),
+        ]);
+
+        try {
+            $workflow->start()->getResult();
+            $this->fail('Interrupt not thrown');
+        } catch (WorkflowInterrupt $interrupt) {
+            $this->assertEquals('Workflow interrupted for human input', $interrupt->getMessage());
+            $this->assertEquals([
+                'toolName' => 'test'
+            ], $interrupt->getData());
+        }
     }
 }
