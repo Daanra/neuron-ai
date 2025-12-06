@@ -12,6 +12,10 @@ use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\Usage;
 use Psr\Http\Message\ResponseInterface;
 
+use function array_key_exists;
+use function array_unshift;
+use function json_decode;
+
 trait HandleChat
 {
     public function chat(array $messages): Message
@@ -23,7 +27,7 @@ trait HandleChat
     {
         // Include the system prompt
         if (isset($this->system)) {
-            \array_unshift($messages, new Message(MessageRole::SYSTEM, $this->system));
+            array_unshift($messages, new Message(MessageRole::SYSTEM, $this->system));
         }
 
         $json = [
@@ -39,15 +43,15 @@ trait HandleChat
 
         return $this->client->postAsync('chat/completions', [RequestOptions::JSON => $json])
             ->then(function (ResponseInterface $response) {
-                $result = \json_decode($response->getBody()->getContents(), true);
+                $result = json_decode($response->getBody()->getContents(), true);
 
                 if ($result['choices'][0]['finish_reason'] === 'tool_calls') {
                     $response = $this->createToolCallMessage($result['choices'][0]['message']);
                 } else {
-                    $response = new AssistantMessage($result['choices'][0]['message']['content']);
+                    $response = $this->createAssistantMessage($result);
                 }
 
-                if (\array_key_exists('usage', $result)) {
+                if (array_key_exists('usage', $result)) {
                     $response->setUsage(
                         new Usage($result['usage']['prompt_tokens'], $result['usage']['completion_tokens'])
                     );
@@ -55,5 +59,10 @@ trait HandleChat
 
                 return $response;
             });
+    }
+
+    protected function createAssistantMessage(array $response): AssistantMessage
+    {
+        return new AssistantMessage($response['choices'][0]['message']['content']);
     }
 }

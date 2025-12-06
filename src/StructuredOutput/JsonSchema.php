@@ -14,6 +14,23 @@ use ReflectionProperty;
 use ReflectionUnionType;
 use ReflectionType;
 
+use function array_filter;
+use function array_map;
+use function array_merge;
+use function array_pop;
+use function array_unique;
+use function basename;
+use function class_exists;
+use function count;
+use function enum_exists;
+use function explode;
+use function in_array;
+use function is_array;
+use function preg_match;
+use function preg_match_all;
+use function str_replace;
+use function strtolower;
+
 /**
  * @method static static make(string $discriminator = '__classname__')
  */
@@ -61,7 +78,8 @@ class JsonSchema
         $reflection = new ReflectionClass($class);
 
         // Check for circular reference
-        if (\in_array($class, $this->processedClasses, true)) {
+        if (in_array($class, $this->processedClasses)) {
+            // For circular references, return a simple object schema to break the cycle
             return ['type' => 'object'];
         }
 
@@ -69,7 +87,8 @@ class JsonSchema
 
         if ($reflection->isEnum()) {
             $result = $this->processEnum(new ReflectionEnum($class));
-            \array_pop($this->processedClasses);
+            // Remove the class from the processed list after processing
+            array_pop($this->processedClasses);
             return $result;
         }
 
@@ -106,7 +125,9 @@ class JsonSchema
             $schema['required'] = $requiredProperties;
         }
 
-        \array_pop($this->processedClasses);
+        // Remove the class from the processed list after processing
+        array_pop($this->processedClasses);
+
         return $schema;
     }
 
@@ -160,7 +181,9 @@ class JsonSchema
             $docComment = $property->getDocComment();
             if ($docComment) {
                 $types = $this->extractArrayItemTypes($docComment);
-                if (\count($types) === 1) {
+
+                if (count($types) === 1) {
+                    // Single class type - use existing logic
                     $schema['items'] = $this->generateClassSchema($types[0]);
                 } elseif (\count($types) > 1) {
                     $schema['items'] = $this->generateAnyOfSchema($types);
@@ -170,21 +193,30 @@ class JsonSchema
             } else {
                 $schema['items'] = ['type' => 'string'];
             }
-        } elseif ($typeName && \enum_exists($typeName)) {
+
+        }
+        // Handle enum types
+        elseif ($typeName && enum_exists($typeName)) {
             $enumReflection = new ReflectionEnum($typeName);
-            $schema = \array_merge($schema, $this->processEnum($enumReflection));
-        } elseif ($typeName && \class_exists($typeName)) {
-            $schema = \array_merge($schema, $this->generateClassSchema($typeName));
-        } elseif ($typeName) {
-            $schema = \array_merge($schema, $this->getBasicTypeSchema($typeName));
+            $schema = array_merge($schema, $this->processEnum($enumReflection));
+        }
+        // Handle class types
+        elseif ($typeName && class_exists($typeName)) {
+            $classSchema = $this->generateClassSchema($typeName);
+            $schema = array_merge($schema, $classSchema);
+        }
+        // Handle basic types
+        elseif ($typeName) {
+            $typeSchema = $this->getBasicTypeSchema($typeName);
+            $schema = array_merge($schema, $typeSchema);
         } else {
             $schema['type'] = 'string';
         }
 
-        // Nullable for single named types only (NOT unions)
-        if ($named && $named->allowsNull() && isset($schema['type']) && !isset($schema['$ref']) && !isset($schema['allOf'])) {
-            if (\is_array($schema['type'])) {
-                if (!\in_array('null', $schema['type'], true)) {
+        // Handle nullable types - for basic types only
+        if ($type && $type->allowsNull() && isset($schema['type']) && !isset($schema['$ref']) && !isset($schema['allOf'])) {
+            if (is_array($schema['type'])) {
+                if (!in_array('null', $schema['type'])) {
                     $schema['type'][] = 'null';
                 }
             } else {
@@ -361,6 +393,52 @@ class JsonSchema
         }
         return null;
     }
+//
+//    /**
+//     * Get schema for a basic PHP type
+//     *
+//     * @param string $type PHP type name
+//     * @return array Schema for the type
+//     * @throws ReflectionException
+//     */
+//    protected function getBasicTypeSchema(string $type): array
+//    {
+//        switch ($type) {
+//            case 'string':
+//                return ['type' => 'string'];
+//
+//            case 'int':
+//            case 'integer':
+//                return ['type' => 'integer'];
+//
+//            case 'float':
+//            case 'double':
+//                return ['type' => 'number'];
+//
+//            case 'bool':
+//            case 'boolean':
+//                return ['type' => 'boolean'];
+//
+//            case 'array':
+//                return [
+//                    'type' => 'array',
+//                    'items' => ['type' => 'string'],
+//                ];
+//
+//            default:
+//                // Check if it's a class or enum
+//                if (class_exists($type)) {
+//                    return $this->generateClassSchema($type);
+//                }
+//                // Check if it's a class or enum
+//                if (enum_exists($type)) {
+//                    return $this->processEnum(new ReflectionEnum($type));
+//                }
+//
+//                // Default to string for unknown types
+//                return ['type' => 'string'];
+//        }
+//    }
 
     /**
      * Extract array item types from PHPDoc comment
@@ -376,19 +454,19 @@ class JsonSchema
     protected function extractArrayItemTypes(string $docComment): array
     {
         // Try to match array<Type1|Type2|...> format
-        if (\preg_match('/@var\s+array<([^>]+)>/', $docComment, $matches)) {
+        if (preg_match('/@var\s+array<([^>]+)>/', $docComment, $matches)) {
             $typesString = $matches[1];
             // Split by pipe and trim whitespace
             return $this->filterClassTypes(
-                \array_map(trim(...), \explode('|', $typesString))
+                array_map(trim(...), explode('|', $typesString))
             );
         }
 
         // Try to match Type1[]|Type2[]|... format
-        if (\preg_match_all('/@var\s+([a-zA-Z0-9_\\\\]+)\[\](?:\|([a-zA-Z0-9_\\\\]+)\[\])*/', $docComment, $matches)) {
+        if (preg_match_all('/@var\s+([a-zA-Z0-9_\\\\]+)\[\](?:\|([a-zA-Z0-9_\\\\]+)\[\])*/', $docComment, $matches)) {
             // Extract all types from the first match group
             $fullMatch = $matches[0][0] ?? '';
-            \preg_match_all('/([a-zA-Z0-9_\\\\]+)\[\]/', $fullMatch, $typeMatches);
+            preg_match_all('/([a-zA-Z0-9_\\\\]+)\[\]/', $fullMatch, $typeMatches);
             return $this->filterClassTypes($typeMatches[1]);
         }
 
@@ -403,7 +481,7 @@ class JsonSchema
      */
     protected function filterClassTypes(array $types): array
     {
-        return \array_filter($types, fn (string $type): bool => \class_exists($type) || \enum_exists($type));
+        return array_filter($types, fn (string $type): bool => class_exists($type) || enum_exists($type));
     }
 
     /**
@@ -420,15 +498,15 @@ class JsonSchema
         foreach ($types as $type) {
             $schema = null;
 
-            if (\class_exists($type)) {
+            if (class_exists($type)) {
                 $schema = $this->generateClassSchema($type);
-            } elseif (\enum_exists($type)) {
+            } elseif (enum_exists($type)) {
                 $schema = $this->processEnum(new ReflectionEnum($type));
             }
 
             if ($schema !== null) {
                 // Extract the short class name (lowercase) for discriminator
-                $shortName = \strtolower(\basename(\str_replace('\\', '/', $type)));
+                $shortName = strtolower(basename(str_replace('\\', '/', $type)));
 
                 // Inject __classname__ discriminator into schema
                 $schema = $this->injectDiscriminator($schema, $shortName);
@@ -461,7 +539,7 @@ class JsonSchema
             ];
 
             // Make __classname__ required
-            $schema['required'] = \array_unique([
+            $schema['required'] = array_unique([
                 $this->discriminator,
                 ...($schema['required'] ?? []),
             ]);

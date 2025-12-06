@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace NeuronAI\Providers\OpenAI;
 
 use GuzzleHttp\Client;
-use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\ToolCallMessage;
 use NeuronAI\Exceptions\ProviderException;
 use NeuronAI\Providers\HasGuzzleClient;
@@ -15,6 +14,10 @@ use NeuronAI\Providers\HttpClientOptions;
 use NeuronAI\Providers\MessageMapperInterface;
 use NeuronAI\Providers\ToolPayloadMapperInterface;
 use NeuronAI\Tools\ToolInterface;
+
+use function array_map;
+use function json_decode;
+use function trim;
 
 class OpenAI implements AIProviderInterface
 {
@@ -48,7 +51,7 @@ class OpenAI implements AIProviderInterface
         protected ?HttpClientOptions $httpOptions = null,
     ) {
         $config = [
-            'base_uri' => \trim($this->baseUri, '/').'/',
+            'base_uri' => trim($this->baseUri, '/').'/',
             'headers' => [
                 'Accept' => 'application/json',
                 'Content-Type' => 'application/json',
@@ -83,12 +86,12 @@ class OpenAI implements AIProviderInterface
      * @param array<string, mixed> $message
      * @throws ProviderException
      */
-    protected function createToolCallMessage(array $message): Message
+    protected function createToolCallMessage(array $message): ToolCallMessage
     {
-        $tools = \array_map(
+        $tools = array_map(
             fn (array $item): ToolInterface => $this->findTool($item['function']['name'])
                 ->setInputs(
-                    \json_decode((string) $item['function']['arguments'], true)
+                    json_decode((string) $item['function']['arguments'], true)
                 )
                 ->setCallId($item['id']),
             $message['tool_calls']
@@ -100,6 +103,8 @@ class OpenAI implements AIProviderInterface
 
         $result = new ToolCallMessage($content, $tools);
 
-        return $result->addMetadata('tool_calls', $message['tool_calls']);
+        $result->addMetadata('tool_calls', $message['tool_calls']);
+
+        return $result;
     }
 }

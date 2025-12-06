@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace NeuronAI\Providers\Gemini;
 
 use GuzzleHttp\Client;
-use NeuronAI\Chat\Enums\MessageRole;
 use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\ToolCallMessage;
 use NeuronAI\Exceptions\ProviderException;
@@ -15,6 +14,10 @@ use NeuronAI\Providers\HandleWithTools;
 use NeuronAI\Providers\HttpClientOptions;
 use NeuronAI\Providers\MessageMapperInterface;
 use NeuronAI\Providers\ToolPayloadMapperInterface;
+use NeuronAI\Tools\ToolInterface;
+
+use function array_filter;
+use function array_map;
 
 class Gemini implements AIProviderInterface
 {
@@ -85,9 +88,15 @@ class Gemini implements AIProviderInterface
      */
     protected function createToolCallMessage(array $message): Message
     {
-        $tools = \array_map(function (array $item): ?\NeuronAI\Tools\ToolInterface {
+        $signature = null;
+
+        $tools = array_map(function (array $item) use (&$signature): ?ToolInterface {
             if (!isset($item['functionCall'])) {
                 return null;
+            }
+
+            if ($item['thoughtSignature'] ?? false) {
+                $signature = $item['thoughtSignature'];
             }
 
             // Gemini does not use ID. It uses the tool's name as a unique identifier.
@@ -98,9 +107,12 @@ class Gemini implements AIProviderInterface
 
         $result = new ToolCallMessage(
             $message['content'] ?? null,
-            \array_filter($tools)
+            array_filter($tools)
         );
-        $result->setRole(MessageRole::MODEL);
+
+        if ($signature !== null) {
+            $result->addMetadata('thoughtSignature', $signature);
+        }
 
         return $result;
     }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace NeuronAI\Providers\OpenAI;
 
 use NeuronAI\Chat\Attachments\Attachment;
+use NeuronAI\Chat\Attachments\Document;
 use NeuronAI\Chat\Enums\AttachmentContentType;
 use NeuronAI\Chat\Enums\AttachmentType;
 use NeuronAI\Chat\Enums\MessageRole;
@@ -15,6 +16,12 @@ use NeuronAI\Chat\Messages\ToolCallResultMessage;
 use NeuronAI\Chat\Messages\UserMessage;
 use NeuronAI\Exceptions\ProviderException;
 use NeuronAI\Providers\MessageMapperInterface;
+
+use function array_key_exists;
+use function is_string;
+use function uniqid;
+use function array_is_list;
+use function array_merge;
 
 class MessageMapper implements MessageMapperInterface
 {
@@ -28,7 +35,7 @@ class MessageMapper implements MessageMapperInterface
         $this->mapping = [];
 
         foreach ($messages as $message) {
-            match ($message::class) {
+            $item = match ($message::class) {
                 Message::class,
                 UserMessage::class,
                 AssistantMessage::class => $this->mapMessage($message),
@@ -36,6 +43,12 @@ class MessageMapper implements MessageMapperInterface
                 ToolCallResultMessage::class => $this->mapToolsResult($message),
                 default => throw new ProviderException('Could not map message type '.$message::class),
             };
+
+            if (array_is_list($item)) {
+                $this->mapping = array_merge($this->mapping, $item);
+            } else {
+                $this->mapping[] = $item;
+            }
         }
 
         return $this->mapping;
@@ -44,17 +57,17 @@ class MessageMapper implements MessageMapperInterface
     /**
      * @throws ProviderException
      */
-    protected function mapMessage(Message $message): void
+    protected function mapMessage(Message $message): array
     {
         $payload = $message->jsonSerialize();
 
-        if (\array_key_exists('usage', $payload)) {
+        if (array_key_exists('usage', $payload)) {
             unset($payload['usage']);
         }
 
         $attachments = $message->getAttachments();
 
-        if (\is_string($payload['content']) && $attachments) {
+        if (is_string($payload['content'])) {
             $payload['content'] = [
                 [
                     'type' => 'text',
@@ -64,10 +77,10 @@ class MessageMapper implements MessageMapperInterface
         }
 
         foreach ($attachments as $attachment) {
-            if ($attachment->type === AttachmentType::DOCUMENT) {
+            if ($attachment instanceof Document) {
                 if ($attachment->contentType === AttachmentContentType::URL) {
                     // OpenAI does not support URL type
-                    throw new ProviderException('This provider does not support URL document attachments.');
+                    throw new ProviderException('OpenAI does not support URL document attachments.');
                 }
 
                 $payload['content'][] = $this->mapDocumentAttachment($attachment);
@@ -78,17 +91,16 @@ class MessageMapper implements MessageMapperInterface
 
         unset($payload['attachments']);
 
-        $this->mapping[] = $payload;
+        return $payload;
     }
 
-    public function mapDocumentAttachment(Attachment $attachment): array
+    public function mapDocumentAttachment(Document $document): array
     {
         return [
             'type' => 'file',
             'file' => [
-                // The filename is required, but the Document class does not have a filename property.
-                'filename' => "attachment-".\uniqid().".pdf",
-                'file_data' => "data:{$attachment->mediaType};base64,{$attachment->content}",
+                'filename' => $document->filename ?? "attachment-".uniqid().".pdf",
+                'file_data' => "data:{$document->mediaType};base64,{$document->content}",
             ]
         ];
     }
@@ -111,28 +123,32 @@ class MessageMapper implements MessageMapperInterface
         };
     }
 
-    protected function mapToolCall(ToolCallMessage $message): void
+    protected function mapToolCall(ToolCallMessage $message): array
     {
         $message = $message->jsonSerialize();
 
-        if (\array_key_exists('usage', $message)) {
+        if (array_key_exists('usage', $message)) {
             unset($message['usage']);
         }
 
         unset($message['type']);
         unset($message['tools']);
 
-        $this->mapping[] = $message;
+        return $message;
     }
 
-    protected function mapToolsResult(ToolCallResultMessage $message): void
+    protected function mapToolsResult(ToolCallResultMessage $message): array
     {
+        $items = [];
+
         foreach ($message->getTools() as $tool) {
-            $this->mapping[] = [
+            $items[] = [
                 'role' => MessageRole::TOOL->value,
                 'tool_call_id' => $tool->getCallId(),
                 'content' => $tool->getResult()
             ];
         }
+
+        return $items;
     }
 }
